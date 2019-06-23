@@ -9,9 +9,7 @@ from __future__ import (
 
 import argparse
 import cgi
-import errno
 import logging as _logging
-import multiprocessing
 import os.path
 import plistlib
 import posixpath
@@ -23,9 +21,7 @@ import sys
 import tempfile
 import urllib2
 import urlparse
-
-TIMEOUT = 30
-
+import zipfile
 
 logger = _logging.getLogger("macfit")
 
@@ -34,102 +30,23 @@ def is_url(path):
     return re.search(r"(?i)^[a-z]+://", path)
 
 
-def executor_loop(pipe):
-    while True:
-        f, args, kwargs = pipe.recv()
-        if f is None:
-            break
-        try:
-            result = f(*args, **kwargs)
-        except Exception as ex:
-            pipe.send((False, ex))
+class InstallOperation(object):
+    def __init__(self, app_names=None, dst_dir=None, owner=None):
+        self.app_names = app_names or []
+        if dst_dir is None:
+            if os.getuid() == 0:
+                dst_dir = "/Applications"
+            else:
+                dst_dir = os.path.expanduser("~/Applications")
+        logger.debug("Destination directory is %r", dst_dir)
+        self.dst_dir = dst_dir
+        if owner:
+            pwent = pwd.getpwnam(owner)
+            self.owner_uid = pwent.pw_uid
+            self.owner_gid = pwent.pw_gid
         else:
-            pipe.send((True, result))
-
-
-def make_executor_subprocess(context):
-    theirs, ours = multiprocessing.Pipe()
-    process = multiprocessing.Process(target=executor_loop, args=(theirs,))
-    process.start()
-
-    def clean_up_executor():
-        if process.is_alive():
-            logger.debug("Closing down privileged executor")
-            # I bet this could block, and hence a bug.
-            ours.send((None, None, None))
-            process.join(TIMEOUT)
-            if process.is_alive():
-                process.terminate()
-
-    context.add_clean_up(clean_up_executor)
-
-    def run_in_executor(f, *args, **kwargs):
-        ours.send((f, args, kwargs))
-        succeeded, result = ours.recv()
-        if succeeded:
-            return result
-        else:
-            raise result
-
-    return run_in_executor
-
-
-def is_privileged():
-    # I have a bad feeling that this line of code may indicate I do
-    # not know what I'm doing with this foot cannon I'm holding.
-    return os.getuid() == 0 or os.geteuid() == 0
-
-
-def drop_privileges(user_name):
-    # I arrived at this implementation after reading man pages and
-    # numerous other sources, in particular:
-    #
-    # Stevens's APUE 3rd, section 8.11 "Changing User IDs and Group
-    # IDs" (has a great diagram)
-    #
-    # _Secure Programming Cookbook for C and C++_ by Matt Messier, John Viega
-    # Section 1.3: Dropping Privileges in setuid Programs
-    # https://www.oreilly.com/library/view/secure-programming-cookbook/0596003943/ch01s03.html
-    #
-    # DJB's daemontools sources, particular setuidgid.c and prot.c
-    # https://github.com/daemontools/daemontools/blob/master/src/
-    #
-    # _Setuid Demystified_ by Hao Chen, David Wagner, and Drew Dean
-    # http://www.cs.umd.edu/~jkatz/TEACHING/comp_sec_F04/downloads/setuid.pdf
-    #
-    # "POS37-C. Ensure that privilege relinquishment is successful"
-    # https://wiki.sei.cmu.edu/confluence/display/c/POS37-C.+Ensure+that+privilege+relinquishment+is+successful
-    assert is_privileged()
-    pwent = pwd.getpwnam(user_name)
-    if not isinstance(pwent.pw_gid, int) or pwent.pw_gid == 0:
-        raise Exception(
-            "Couldn't find non-root group ID for user %r (got %r)"
-            % (user_name, pwent.pw_gid)
-        )
-    os.setgroups([pwent.pw_gid])
-    os.setregid(pwent.pw_gid, pwent.pw_gid)
-    os.setreuid(pwent.pw_uid, pwent.pw_uid)
-    for uid_func in (os.seteuid, os.setuid):
-        try:
-            uid_func(0)
-        except os.error as ex:
-            if ex.errno != errno.EPERM:
-                raise Exception(
-                    (
-                        "Dropping privileges raised %r, not the expected EPERM"
-                        % (ex.errno,)
-                    )
-                )
-        else:
-            raise Exception(
-                "Failed to drop privileges (tested %r)" % (uid_func,)
-            )
-
-
-class Context(object):
-    def __init__(self):
-        self.app_dir = None
-        self.privileged_exec = None
+            self.owner_uid = None
+            self.owner_gid = None
         self.software_path = None
         self._clean_ups = []
         self.dev_null = open(os.devnull, "wb")
@@ -137,6 +54,10 @@ class Context(object):
         self.temp_dir = tempfile.mkdtemp()
         logger.debug("Temp directory is %r", self.temp_dir)
         self.add_clean_up(shutil.rmtree, self.temp_dir, ignore_errors=True)
+
+    @property
+    def should_set_owner(self):
+        return self.owner_uid is not None
 
     def add_clean_up(self, func, *args, **kwargs):
         self._clean_ups.append((func, args, kwargs))
@@ -153,14 +74,8 @@ class Context(object):
             try:
                 func, args, kwargs = elem
                 func(*args, **kwargs)
-            except Exception as ex:
-                print(
-                    (
-                        "Ignoring exception from clean-up %r: %s: %s"
-                        % (elem, ex.__class__.__name__, ex)
-                    ),
-                    file=sys.stderr,
-                )
+            except Exception:
+                logger.exception("Ignoring exception from clean-up %r", elem)
         self._clean_ups = []
 
 
@@ -208,8 +123,10 @@ def copy_with_tar(item, src_dir, dst_dir):
         )
 
 
-def install_dmg(context):
-    logger.debug("Mounting DMG")
+def mount_dmg(install_op, dmg_path=None):
+    if dmg_path is None:
+        dmg_path = install_op.software_path
+    logger.debug("Mounting DMG %r", dmg_path)
     plist = plistlib.readPlistFromString(
         subprocess.check_output(
             # IDME seems to be something that could happen
@@ -217,14 +134,7 @@ def install_dmg(context):
             # anyone uses it, and it's been disabled by default since
             # forever.  Still, for security reasons, and because
             # Homebrew does it, I explicitly disable it here.
-            [
-                "hdiutil",
-                "attach",
-                "-plist",
-                "-readonly",
-                "-noidme",
-                context.software_path,
-            ]
+            ["hdiutil", "attach", "-plist", "-readonly", "-noidme", dmg_path]
         )
     )
     any_device = None
@@ -242,12 +152,12 @@ def install_dmg(context):
             # Note that, on any recent macOS, detaching one mount
             # point should detach the whole DMG, if I'm reading
             # hdiutil(1) correctly.
-            context.add_hdiutil_detach_clean_up(mount_point)
+            install_op.add_hdiutil_detach_clean_up(mount_point)
         elif not any_device:
             any_device = entity.get("dev-entry")
     if not mount_point:
         if any_device:
-            context.add_hdiutil_detach_clean_up(mount_point)
+            install_op.add_hdiutil_detach_clean_up(mount_point)
         raise Exception(
             (
                 "Attached disk image but found no mount point"
@@ -255,17 +165,11 @@ def install_dmg(context):
             )
         )
     logger.debug("Mounted DMG at %r", mount_point)
-    apps = []
-    for item in os.listdir(mount_point):
-        if item.lower().endswith(".app"):
-            full_item_path = os.path.join(mount_point, item)
-            if os.path.isdir(full_item_path):
-                apps.append(item)
-    if len(apps) != 1:
-        raise Exception("Expected a single app bundle, found: %r" % (apps,))
-    dst_app = os.path.join(context.app_dir, apps[0])
-    if os.path.exists(dst_app):
-        raise Exception("%r already exists" % (dst_app,))
+    return mount_point
+
+
+def copy_app_bundle(app_name, src_dir, dst_dir):
+    dst_app = os.path.join(dst_dir, app_name)
     logger.debug("Destination for app bundle is %r", dst_app)
     # Homebrew uses ditto (and mkbom and ugh) to copy apps.  rsync
     # from MacPorts is the only utility tested by Backup
@@ -277,72 +181,154 @@ def install_dmg(context):
     # use.
     #
     # [1]: https://github.com/n8gray/Backup-Bouncer
-    if not os.path.isdir(context.app_dir):
-        logger.debug("Making application directory %r", context.app_dir)
-        context.privileged_exec(os.mkdir, context.app_dir)
-    logger.debug(
-        "Copying %r from %r to %r", apps[0], mount_point, context.app_dir
-    )
-    context.privileged_exec(
-        copy_with_tar, apps[0], mount_point, context.app_dir
-    )
-    logger.debug("Setting ownership of %r", dst_app)
-    context.privileged_exec(
-        subprocess.check_call,
-        ["chown", "-R", "%d:%d" % (os.getuid(), os.getgid()), dst_app],
-    )
+    if not os.path.isdir(dst_dir):
+        logger.debug("Making application directory %r", dst_dir)
+        os.mkdir(dst_dir)
+    logger.debug("Copying %r from %r to %r", app_name, src_dir, dst_dir)
+    copy_with_tar(app_name, src_dir, dst_dir)
+    return dst_app
 
 
-def install_software(url_or_path, user=None, app_names=None, app_dir=None):
+def change_owner(path, uid, gid):
+    logger.debug("Setting ownership of %r to %d:%d", path, uid, gid)
+    subprocess.check_call(["chown", "-R", "%d:%d" % (uid, gid), path])
+
+
+def chmod_recursive(path, mode="u+rwX,og+rX,og-w"):
+    logger.debug("Calling chmod -R %r %r", path, mode)
+    subprocess.check_call(["chmod", "-R", mode, path])
+
+
+def is_app_bundle(path):
+    # This is just meant to be a "good enough" test for whether
+    # something looks like a macOS app bundle.
+    path = path.rstrip("/")
+    if path.lower().endswith(".app") and os.path.isdir(path):
+        contents_dir = os.path.join(path, "Contents")
+        return os.path.isdir(contents_dir) and os.path.exists(
+            os.path.join(contents_dir, "Info.plist")
+        )
+    return False
+
+
+def find_app_bundles_in_dir(install_op, path):
+    if install_op.app_names:
+        missing_apps = []
+        for name in install_op.app_names:
+            if not os.path.exists(os.path.join(path, name)):
+                missing_apps.append(name)
+        if missing_apps:
+            raise Exception("Missing app bundles: %r" % (missing_apps,))
+        apps = install_op.app_names
+    else:
+        apps = []
+        for item in os.listdir(path):
+            if is_app_bundle(os.path.join(path, item)):
+                apps.append(item)
+    return apps
+
+
+def ensure_apps_dont_exist(dest_dir, apps):
+    existing_apps = []
+    for app in apps:
+        if os.path.exists(os.path.join(dest_dir, app)):
+            existing_apps.append(app)
+    if existing_apps:
+        raise Exception(
+            "Some apps already exist in %r: %r" % (dest_dir, existing_apps)
+        )
+
+
+def install_apps_from_dir(install_op, src_dir, move=None):
+    apps = find_app_bundles_in_dir(install_op, src_dir)
+    ensure_apps_dont_exist(install_op.dst_dir, apps)
+    for app in apps:
+        if move:
+            dst_app = os.path.join(install_op.dst_dir, app)
+            shutil.move(os.path.join(src_dir, app), dst_app)
+        else:
+            dst_app = copy_app_bundle(app, src_dir, install_op.dst_dir)
+        if install_op.should_set_owner:
+            change_owner(dst_app, install_op.owner_uid, install_op.owner_gid)
+        chmod_recursive(dst_app)
+
+
+def install_dmg(install_op):
+    mount_point = mount_dmg(install_op)
+    install_apps_from_dir(install_op, mount_point, move=False)
+
+
+def install_zip(install_op):
+    extract_dir = tempfile.mkdtemp(dir=install_op.temp_dir)
+    # We might find that it's better to shell out to /usr/bin/zip to
+    # preserve permissions or work around security concerns with zip
+    # files?  Not sure.  Note for my future self.
+    with zipfile.ZipFile(install_op.software_path, "r") as software_zip:
+        software_zip.extractall(extract_dir)
+    install_apps_from_dir(install_op, extract_dir, move=True)
+
+
+def install_tar(install_op):
+    extract_dir = tempfile.mkdtemp(dir=install_op.temp_dir)
+    # tarfile module is around but I don't know/trust that it
+    # preserves all the things tar -p does, so I just use tar.  -k
+    # means don't overwrite anything, since that should never be
+    # happening here.
+    subprocess.check_call(
+        [
+            "/usr/bin/tar",
+            "-xkp",
+            "-C",
+            extract_dir,
+            "-f",
+            install_op.software_path,
+        ]
+    )
+    install_apps_from_dir(install_op, extract_dir, move=True)
+
+
+def install_software(url_or_path, app_names=None, dst_dir=None, owner=None):
+    # 2.7.9 is when SSL certs started getting checked (according to
+    # the docs).  Also, 2.7.4 is when zipfile module started stripping
+    # bad stuff from path names, so that's important too.
     if sys.version_info.major == 2 and (
-        sys.version_info.minor < 7 or sys.version_info.micro < 9
+        sys.version_info.minor < 7
+        or (sys.version_info.minor == 7 and sys.version_info.micro < 9)
     ):
         raise Exception(
             "Python too old, cannot securely use https, please upgrade"
         )
-    context = Context()
+    install_op = InstallOperation(
+        app_names=app_names, dst_dir=dst_dir, owner=owner
+    )
     try:
-        if is_privileged():
-            if not user:
-                raise Exception(
-                    "Must provide unprivileged user name when running as root"
-                )
-            logger.debug("Making privileged executor")
-            privileged_exec = make_executor_subprocess(context)
-            logger.debug("Dropping privileges")
-            drop_privileges(user)
-        else:
-            privileged_exec = lambda f, *args, **kwargs: f(*args, **kwargs)
-        context.privileged_exec = privileged_exec
-        if app_dir:
-            context.app_dir = app_dir
-        else:
-            context.app_dir = os.path.expanduser("~/Applications")
-        logger.debug("Applications directory is %r", context.app_dir)
         if is_url(url_or_path):
             logger.debug("Downloading %r", url_or_path)
             software_path = download_software_from_url(
-                context.temp_dir, url_or_path
+                install_op.temp_dir, url_or_path
             )
         else:
             logger.debug("Using on-disk %r", url_or_path)
             software_path = url_or_path
-        context.software_path = software_path
-        extension = os.path.splitext(context.software_path)[1].lower()
+        install_op.software_path = software_path
+        extension = os.path.splitext(install_op.software_path)[1].lower()
         if extension == ".dmg":
-            install_dmg(context)
+            install_dmg(install_op)
+        elif extension == ".zip":
+            install_zip(install_op)
+        elif re.search(r"(?i)\.tar\.(Z|gz|bz2)$", install_op.software_path):
+            install_tar(install_op)
         elif extension == ".pkg":
             logger.debug(
-                "Calling installer as root to install %r", context.software_path
+                "Calling installer to install %r", install_op.software_path
             )
-            context.privileged_exec(
-                subprocess.check_call,
-                ["installer", "-pkg", software_path, "-target", "/"],
+            subprocess.check_call(
+                ["installer", "-pkg", software_path, "-target", "/"]
             )
         else:
             raise Exception("Don't know how to install %r" % (software_path,))
     finally:
-        context.run_clean_ups()
+        install_op.run_clean_ups()
 
 
 def main(argv):
@@ -350,27 +336,40 @@ def main(argv):
     parser = argparse.ArgumentParser(prog=argv[0])
     parser.add_argument("--debug", "-d", action="store_true", default=False)
     parser.add_argument("--verbose", "-v", action="store_true", default=False)
-    parser.add_argument("--user", "-u")
+    parser.add_argument(
+        "--owner",
+        help=(
+            "Owner for the installed applications."
+            "  Ignored when installing an Installer package."
+        ),
+    )
     parser.add_argument(
         "--app-name",
         "-a",
         dest="app_names",
         action="append",
         default=[],
+        metavar="NAME",
         help=(
-            "Name of app bundle to install."
+            "Name of app bundle to install within extracted files."
             "  May be specified multiple times."
             "  Ignored when installing an Installer package."
         ),
     )
     app_dir_args = parser.add_mutually_exclusive_group()
-    app_dir_args.add_argument("--app-dir")
+    app_dir_args.add_argument(
+        "--app-dir",
+        help=(
+            "Directory where app bundles will be installed."
+            "  Ignored when installing an Installer package."
+        ),
+    )
     app_dir_args.add_argument(
         "--system",
         dest="app_dir",
         action="store_const",
         const="/Applications",
-        help="Install into /Applications",
+        help="Install into /Applications.",
     )
     parser.add_argument("url_or_path")
     args = parser.parse_args(argv[1:])
@@ -380,9 +379,9 @@ def main(argv):
         logger.setLevel(_logging.INFO)
     install_software(
         args.url_or_path,
-        user=args.user,
         app_names=args.app_names,
-        app_dir=args.app_dir,
+        dst_dir=args.app_dir,
+        owner=args.owner,
     )
 
 
