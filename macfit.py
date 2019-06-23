@@ -349,8 +349,17 @@ def main(argv):
         logger.debug("Using on-disk %r", args.url_or_path)
         software_path = args.url_or_path
     context.software_path = software_path
-    if software_path.lower().endswith(".dmg"):
+    extension = os.path.splitext(context.software_path)[1].lower()
+    if extension == ".dmg":
         install_dmg(context)
+    elif extension == ".pkg":
+        logger.debug(
+            "Calling installer as root to install %r", context.software_path
+        )
+        context.privileged_exec(
+            subprocess.check_call,
+            ["installer", "-pkg", software_path, "-target", "/"],
+        )
     else:
         raise Exception("Don't know how to install %r" % (software_path,))
 
