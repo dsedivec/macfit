@@ -28,7 +28,7 @@ import urlparse
 TIMEOUT = 30
 
 
-logger = None
+logger = _logging.getLogger("macfit")
 
 
 def is_url(path):
@@ -55,6 +55,7 @@ def make_executor_subprocess(context):
 
     def clean_up_executor():
         if process.is_alive():
+            logger.debug("Closing down privileged executor")
             # I bet this could block, and hence a bug.
             ours.send((None, None, None))
             process.join(TIMEOUT)
@@ -115,7 +116,10 @@ def drop_privileges(user_name):
         except os.error as ex:
             if ex.errno != errno.EPERM:
                 raise Exception(
-                    "Dropping privileges returned %r not EPERM" % (ex.errno,)
+                    (
+                        "Dropping privileges raised %r, not the expected EPERM"
+                        % (ex.errno,)
+                    )
                 )
         else:
             raise Exception(
@@ -291,8 +295,6 @@ def install_dmg(context):
 
 def main(argv):
     _logging.basicConfig()
-    global logger
-    logger = _logging.getLogger(os.path.splitext(os.path.basename(argv[0]))[0])
     if sys.version_info.major == 2 and (
         sys.version_info.minor < 7 or sys.version_info.micro < 9
     ):
