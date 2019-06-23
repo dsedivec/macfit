@@ -8,7 +8,6 @@ from __future__ import (
 )
 
 import argparse
-import atexit
 import cgi
 import errno
 import logging as _logging
@@ -214,9 +213,10 @@ def install_dmg(context):
     plist = plistlib.readPlistFromString(
         subprocess.check_output(
             # IDME seems to be something that could happen
-            # automatically when mounting a disk image.  I don't
-            # think anyone uses it, and it's been disabled by
-            # default since forever.
+            # automatically when mounting a disk image.  I don't think
+            # anyone uses it, and it's been disabled by default since
+            # forever.  Still, for security reasons, and because
+            # Homebrew does it, I explicitly disable it here.
             [
                 "hdiutil",
                 "attach",
@@ -293,19 +293,76 @@ def install_dmg(context):
     )
 
 
-def main(argv):
-    _logging.basicConfig()
+def install_software(url_or_path, user=None, app_names=None, app_dir=None):
     if sys.version_info.major == 2 and (
         sys.version_info.minor < 7 or sys.version_info.micro < 9
     ):
         raise Exception(
             "Python too old, cannot securely use https, please upgrade"
         )
+    context = Context()
+    try:
+        if is_privileged():
+            if not user:
+                raise Exception(
+                    "Must provide unprivileged user name when running as root"
+                )
+            logger.debug("Making privileged executor")
+            privileged_exec = make_executor_subprocess(context)
+            logger.debug("Dropping privileges")
+            drop_privileges(user)
+        else:
+            privileged_exec = lambda f, *args, **kwargs: f(*args, **kwargs)
+        context.privileged_exec = privileged_exec
+        if app_dir:
+            context.app_dir = app_dir
+        else:
+            context.app_dir = os.path.expanduser("~/Applications")
+        logger.debug("Applications directory is %r", context.app_dir)
+        if is_url(url_or_path):
+            logger.debug("Downloading %r", url_or_path)
+            software_path = download_software_from_url(
+                context.temp_dir, url_or_path
+            )
+        else:
+            logger.debug("Using on-disk %r", url_or_path)
+            software_path = url_or_path
+        context.software_path = software_path
+        extension = os.path.splitext(context.software_path)[1].lower()
+        if extension == ".dmg":
+            install_dmg(context)
+        elif extension == ".pkg":
+            logger.debug(
+                "Calling installer as root to install %r", context.software_path
+            )
+            context.privileged_exec(
+                subprocess.check_call,
+                ["installer", "-pkg", software_path, "-target", "/"],
+            )
+        else:
+            raise Exception("Don't know how to install %r" % (software_path,))
+    finally:
+        context.run_clean_ups()
+
+
+def main(argv):
+    _logging.basicConfig()
     parser = argparse.ArgumentParser(prog=argv[0])
     parser.add_argument("--debug", "-d", action="store_true", default=False)
     parser.add_argument("--verbose", "-v", action="store_true", default=False)
     parser.add_argument("--user", "-u")
-    parser.add_argument("--app-name")
+    parser.add_argument(
+        "--app-name",
+        "-a",
+        dest="app_names",
+        action="append",
+        default=[],
+        help=(
+            "Name of app bundle to install."
+            "  May be specified multiple times."
+            "  Ignored when installing an Installer package."
+        ),
+    )
     app_dir_args = parser.add_mutually_exclusive_group()
     app_dir_args.add_argument("--app-dir")
     app_dir_args.add_argument(
@@ -321,47 +378,12 @@ def main(argv):
         logger.setLevel(_logging.DEBUG)
     elif args.verbose:
         logger.setLevel(_logging.INFO)
-    context = Context()
-    atexit.register(context.run_clean_ups)
-    if is_privileged():
-        if not args.user:
-            raise Exception(
-                "Must provide unprivileged user name when running as root"
-            )
-        logger.debug("Making privileged executor")
-        privileged_exec = make_executor_subprocess(context)
-        logger.debug("Dropping privileges")
-        drop_privileges(args.user)
-    else:
-        privileged_exec = lambda f, *args, **kwargs: f(*args, **kwargs)
-    context.privileged_exec = privileged_exec
-    if args.app_dir:
-        context.app_dir = args.app_dir
-    else:
-        context.app_dir = os.path.expanduser("~/Applications")
-    logger.debug("Applications directory is %r", context.app_dir)
-    if is_url(args.url_or_path):
-        logger.debug("Downloading %r", args.url_or_path)
-        software_path = download_software_from_url(
-            context.temp_dir, args.url_or_path
-        )
-    else:
-        logger.debug("Using on-disk %r", args.url_or_path)
-        software_path = args.url_or_path
-    context.software_path = software_path
-    extension = os.path.splitext(context.software_path)[1].lower()
-    if extension == ".dmg":
-        install_dmg(context)
-    elif extension == ".pkg":
-        logger.debug(
-            "Calling installer as root to install %r", context.software_path
-        )
-        context.privileged_exec(
-            subprocess.check_call,
-            ["installer", "-pkg", software_path, "-target", "/"],
-        )
-    else:
-        raise Exception("Don't know how to install %r" % (software_path,))
+    install_software(
+        args.url_or_path,
+        user=args.user,
+        app_names=args.app_names,
+        app_dir=args.app_dir,
+    )
 
 
 if __name__ == "__main__":
