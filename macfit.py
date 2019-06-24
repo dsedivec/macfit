@@ -121,6 +121,10 @@ def maybe_download_software_from_url(install_op, url):
         )
         install_op.download_name = params.get("filename")
     if not install_op.download_name:
+        # If we followed a redirect, maybe the final URL has a better
+        # base name than the original URL.
+        install_op.download_name = get_url_path_base_name(response.geturl())
+    if not install_op.download_name:
         install_op.download_name = get_url_path_base_name(url)
     if not install_op.download_name:
         raise Exception("Can't figure out a file name for %r" % (url,))
