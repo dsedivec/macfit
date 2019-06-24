@@ -31,7 +31,10 @@ def is_url(path):
 
 
 class InstallOperation(object):
-    def __init__(self, app_names=None, dst_dir=None, owner=None):
+    def __init__(
+        self, cache_dir=None, app_names=None, dst_dir=None, owner=None
+    ):
+        self.cache_dir = cache_dir
         self.app_names = app_names or []
         if dst_dir is None:
             if os.getuid() == 0:
@@ -84,7 +87,21 @@ def create_file(path):
     return os.fdopen(fd, "wb")
 
 
-def download_software_from_url(download_dir, url):
+def get_url_path_base_name(url):
+    return posixpath.basename(urlparse.urlparse(url).path)
+
+
+def maybe_download_software_from_url(install_op, url):
+    if install_op.cache_dir:
+        url_base_name = get_url_path_base_name(url)
+        if url_base_name:
+            cache_path = os.path.join(install_op.cache_dir, url_base_name)
+            if os.path.exists(cache_path):
+                logger.debug("Using cached %r", cache_path)
+                return cache_path
+    else:
+        url_base_name = None
+    logger.debug("Downloading %r", url)
     # I preferred urllib2 to urllib here because it raises a
     # nice error on e.g. HTTP 404.
     response = urllib2.urlopen(url)
@@ -95,14 +112,23 @@ def download_software_from_url(download_dir, url):
     )
     file_name = params.get("filename")
     if not file_name:
-        url_parsed = urlparse.urlparse(url)
-        file_name = posixpath.basename(url_parsed.path)
+        file_name = url_base_name or get_url_path_base_name(url)
     if not file_name:
         raise Exception("Can't figure out a file name for %r" % (url,))
-    software_path = os.path.join(download_dir, file_name)
+    software_path = os.path.join(
+        install_op.cache_dir or install_op.temp_dir, file_name
+    )
+    logger.debug("Will download to %r", software_path)
     with create_file(software_path) as download:
         shutil.copyfileobj(response, download)
     response.close()
+    if install_op.cache_dir and install_op.should_set_owner:
+        logger.debug(
+            "Chowning cached download to %d:%d",
+            install_op.owner_uid,
+            install_op.owner_gid,
+        )
+        os.chown(software_path, install_op.owner_uid, install_op.owner_gid)
     return software_path
 
 
@@ -292,7 +318,7 @@ def install_tar(install_op):
     install_apps_from_dir(install_op, extract_dir, move=True)
 
 
-def install_software(url_or_path, app_names=None, dst_dir=None, owner=None):
+def install_software(url_or_path, install_op):
     # 2.7.9 is when SSL certs started getting checked (according to
     # the docs).  Also, 2.7.4 is when zipfile module started stripping
     # bad stuff from path names, so that's important too.
@@ -303,14 +329,10 @@ def install_software(url_or_path, app_names=None, dst_dir=None, owner=None):
         raise Exception(
             "Python too old, cannot securely use https, please upgrade"
         )
-    install_op = InstallOperation(
-        app_names=app_names, dst_dir=dst_dir, owner=owner
-    )
     try:
         if is_url(url_or_path):
-            logger.debug("Downloading %r", url_or_path)
-            software_path = download_software_from_url(
-                install_op.temp_dir, url_or_path
+            software_path = maybe_download_software_from_url(
+                install_op, url_or_path
             )
         else:
             logger.debug("Using on-disk %r", url_or_path)
@@ -375,16 +397,26 @@ def main(argv):
         const="/Applications",
         help="Install into /Applications.",
     )
+    parser.add_argument(
+        "--cache-dir",
+        "-c",
+        metavar="PATH",
+        help="""\
+            Use downloads from PATH if they exist.  Otherwise, new
+            downloads are saved to this directory.  Has no effect when
+            installing a local file.""",
+    )
     parser.add_argument("url_or_path")
     args = parser.parse_args(argv[1:])
     if args.debug:
         logger.setLevel(_logging.DEBUG)
-    install_software(
-        args.url_or_path,
+    install_op = InstallOperation(
+        cache_dir=args.cache_dir,
         app_names=args.app_names,
         dst_dir=args.app_dir,
         owner=args.owner,
     )
+    install_software(args.url_or_path, install_op)
 
 
 if __name__ == "__main__":
