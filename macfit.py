@@ -340,7 +340,6 @@ def main(argv):
     _logging.basicConfig()
     parser = argparse.ArgumentParser(prog=argv[0])
     parser.add_argument("--debug", "-d", action="store_true", default=False)
-    parser.add_argument("--verbose", "-v", action="store_true", default=False)
     parser.add_argument(
         "--owner",
         help=(
@@ -380,8 +379,6 @@ def main(argv):
     args = parser.parse_args(argv[1:])
     if args.debug:
         logger.setLevel(_logging.DEBUG)
-    elif args.verbose:
-        logger.setLevel(_logging.INFO)
     install_software(
         args.url_or_path,
         app_names=args.app_names,
