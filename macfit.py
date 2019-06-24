@@ -79,6 +79,11 @@ class InstallOperation(object):
         self._clean_ups = []
 
 
+def create_file(path):
+    fd = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+    return os.fdopen(fd, "wb")
+
+
 def download_software_from_url(download_dir, url):
     # I preferred urllib2 to urllib here because it raises a
     # nice error on e.g. HTTP 404.
@@ -95,7 +100,7 @@ def download_software_from_url(download_dir, url):
     if not file_name:
         raise Exception("Can't figure out a file name for %r" % (url,))
     software_path = os.path.join(download_dir, file_name)
-    with open(software_path, "wb") as download:
+    with create_file(software_path) as download:
         shutil.copyfileobj(response, download)
     response.close()
     return software_path
