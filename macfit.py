@@ -32,9 +32,15 @@ def is_url(path):
 
 class InstallOperation(object):
     def __init__(
-        self, cache_dir=None, app_names=None, dst_dir=None, owner=None
+        self,
+        cache_dir=None,
+        download_name=None,
+        app_names=None,
+        dst_dir=None,
+        owner=None,
     ):
         self.cache_dir = cache_dir
+        self.download_name = download_name
         self.app_names = app_names or []
         if dst_dir is None:
             if os.getuid() == 0:
@@ -92,34 +98,37 @@ def get_url_path_base_name(url):
 
 
 def maybe_download_software_from_url(install_op, url):
+    assert not install_op.software_path
     if install_op.cache_dir:
-        url_base_name = get_url_path_base_name(url)
-        if url_base_name:
-            cache_path = os.path.join(install_op.cache_dir, url_base_name)
+        cache_file_name = install_op.download_name or get_url_path_base_name(
+            url
+        )
+        if cache_file_name:
+            cache_path = os.path.join(install_op.cache_dir, cache_file_name)
             if os.path.exists(cache_path):
                 logger.debug("Using cached %r", cache_path)
-                return cache_path
-    else:
-        url_base_name = None
+                install_op.software_path = cache_path
+                return
     logger.debug("Downloading %r", url)
     # I preferred urllib2 to urllib here because it raises a
     # nice error on e.g. HTTP 404.
     response = urllib2.urlopen(url)
-    # Code for reading Content-Disposition courtesy
-    # https://stackoverflow.com/a/11783319.
-    _, params = cgi.parse_header(
-        response.headers.get("Content-Disposition", "")
-    )
-    file_name = params.get("filename")
-    if not file_name:
-        file_name = url_base_name or get_url_path_base_name(url)
-    if not file_name:
+    if not install_op.download_name:
+        # Code for reading Content-Disposition courtesy
+        # https://stackoverflow.com/a/11783319.
+        _, params = cgi.parse_header(
+            response.headers.get("Content-Disposition", "")
+        )
+        install_op.download_name = params.get("filename")
+    if not install_op.download_name:
+        install_op.download_name = get_url_path_base_name(url)
+    if not install_op.download_name:
         raise Exception("Can't figure out a file name for %r" % (url,))
-    software_path = os.path.join(
-        install_op.cache_dir or install_op.temp_dir, file_name
+    install_op.software_path = os.path.join(
+        install_op.cache_dir or install_op.temp_dir, install_op.download_name
     )
-    logger.debug("Will download to %r", software_path)
-    with create_file(software_path) as download:
+    logger.debug("Will download to %r", install_op.software_path)
+    with create_file(install_op.software_path) as download:
         shutil.copyfileobj(response, download)
     response.close()
     if install_op.cache_dir and install_op.should_set_owner:
@@ -128,8 +137,9 @@ def maybe_download_software_from_url(install_op, url):
             install_op.owner_uid,
             install_op.owner_gid,
         )
-        os.chown(software_path, install_op.owner_uid, install_op.owner_gid)
-    return software_path
+        os.chown(
+            install_op.software_path, install_op.owner_uid, install_op.owner_gid
+        )
 
 
 def copy_with_tar(item, src_dir, dst_dir):
@@ -338,24 +348,27 @@ def install_software(url_or_path, install_op):
         )
     try:
         if is_url(url_or_path):
-            software_path = maybe_download_software_from_url(
-                install_op, url_or_path
-            )
+            maybe_download_software_from_url(install_op, url_or_path)
         else:
+            if not os.path.exists(url_or_path):
+                raise Exception("%r does not exist" % (url_or_path,))
             logger.debug("Using on-disk %r", url_or_path)
-            software_path = url_or_path
-        install_op.software_path = software_path
+            install_op.software_path = url_or_path
         extension = os.path.splitext(install_op.software_path)[1].lower()
         if extension == ".dmg":
             install_dmg(install_op)
         elif extension == ".zip":
             install_zip(install_op)
-        elif re.search(r"(?i)\.tar\.(Z|gz|bz2)$", install_op.software_path):
+        elif re.search(
+            r"(?i)\.tar(?:\.(?:Z|gz|bz2))?$", install_op.software_path
+        ):
             install_tar(install_op)
         elif extension == ".pkg":
             install_pkg(install_op)
         else:
-            raise Exception("Don't know how to install %r" % (software_path,))
+            raise Exception(
+                "Don't know how to install %r" % (install_op.software_path,)
+            )
     finally:
         install_op.run_clean_ups()
 
@@ -400,20 +413,44 @@ def main(argv):
         help="Install into /Applications.",
     )
     parser.add_argument(
-        "--cache-dir",
+        "--cache",
         "-c",
         metavar="PATH",
         help="""\
-            Use downloads from PATH if they exist.  Otherwise, new
-            downloads are saved to this directory.  Has no effect when
-            installing a local file.""",
+            Directory or file to download to.  If PATH is a directory,
+            the file will be downloaded into the directory.
+            Otherwise, the file will be downloaded as PATH.  However,
+            if PATH ends with a slash or if --name is also given, PATH
+            will be unconditionally interpreted as a directory, and
+            the directory will be created if it does not already
+            exist.""",
+    )
+    parser.add_argument(
+        "--name",
+        "-n",
+        dest="download_name",
+        help="""\
+            Name of the downloaded file.  If not given, will be
+            inferred from the URL, or from the server response.
+            Ignored when installing a local file.""",
     )
     parser.add_argument("url_or_path")
+    parser.set_defaults(cache_dir=None)
     args = parser.parse_args(argv[1:])
     if args.debug:
         logger.setLevel(_logging.DEBUG)
+    if args.download_name:
+        args.cache_dir = args.cache
+    elif args.cache:
+        if args.cache.endswith("/") or os.path.isdir(args.cache):
+            args.cache_dir = args.cache
+        else:
+            cache_dir, download_name = os.path.split()
+            args.cache_dir = cache_dir or None
+            args.download_name = download_name or None
     install_op = InstallOperation(
         cache_dir=args.cache_dir,
+        download_name=args.download_name,
         app_names=args.app_names,
         dst_dir=args.app_dir,
         owner=args.owner,
