@@ -318,6 +318,13 @@ def install_tar(install_op):
     install_apps_from_dir(install_op, extract_dir, move=True)
 
 
+def install_pkg(install_op):
+    logger.debug("Calling installer to install %r", install_op.software_path)
+    subprocess.check_call(
+        ["installer", "-pkg", install_op.software_path, "-target", "/"]
+    )
+
+
 def install_software(url_or_path, install_op):
     # 2.7.9 is when SSL certs started getting checked (according to
     # the docs).  Also, 2.7.4 is when zipfile module started stripping
@@ -346,12 +353,7 @@ def install_software(url_or_path, install_op):
         elif re.search(r"(?i)\.tar\.(Z|gz|bz2)$", install_op.software_path):
             install_tar(install_op)
         elif extension == ".pkg":
-            logger.debug(
-                "Calling installer to install %r", install_op.software_path
-            )
-            subprocess.check_call(
-                ["installer", "-pkg", software_path, "-target", "/"]
-            )
+            install_pkg(install_op)
         else:
             raise Exception("Don't know how to install %r" % (software_path,))
     finally:
