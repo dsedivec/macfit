@@ -179,7 +179,19 @@ def mount_dmg(install_op, dmg_path=None):
             # anyone uses it, and it's been disabled by default since
             # forever.  Still, for security reasons, and because
             # Homebrew does it, I explicitly disable it here.
-            ["hdiutil", "attach", "-plist", "-readonly", "-noidme", dmg_path]
+            #
+            # Using -nobrowse in an attempt to get Finder not to do
+            # things like pop up the newly mounted volume for
+            # Dropbox's DMG.
+            [
+                "hdiutil",
+                "attach",
+                "-plist",
+                "-readonly",
+                "-noidme",
+                "-nobrowse",
+                dmg_path,
+            ]
         )
     )
     any_device = None
