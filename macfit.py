@@ -228,14 +228,14 @@ def find_app_bundles_in_dir(install_op, path):
     return apps
 
 
-def ensure_apps_dont_exist(dest_dir, apps):
+def ensure_apps_dont_exist(dst_dir, apps):
     existing_apps = []
     for app in apps:
-        if os.path.exists(os.path.join(dest_dir, app)):
+        if os.path.exists(os.path.join(dst_dir, app)):
             existing_apps.append(app)
     if existing_apps:
         raise Exception(
-            "Some apps already exist in %r: %r" % (dest_dir, existing_apps)
+            "Some apps already exist in %r: %r" % (dst_dir, existing_apps)
         )
 
 
