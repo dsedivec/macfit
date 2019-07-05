@@ -465,27 +465,30 @@ DST_DIR_USER = Sentinel("DST_DIR_USER")
 
 
 class ScrapedLink(Exception):
-    def __init__(self, match):
+    def __init__(self, url):
         Exception.__init__(self)
-        self.match = match
+        self.url = url
 
 
 class LinkScraper(HTMLParser):
-    def __init__(self, link_regexp):
+    def __init__(self, base_url, link_regexp):
         HTMLParser.__init__(self)
+        self._base_url = base_url
         self._link_regexp = re.compile(link_regexp)
 
     def handle_starttag(self, tag, attrs):
         if tag.lower() == "a":
             for name, value in attrs:
                 if name.lower() == "href":
-                    match = self._link_regexp.search(value)
-                    if match:
-                        raise ScrapedLink(match)
+                    url = urlparse.urljoin(self._base_url, value)
+                    if self._link_regexp.search(url):
+                        # Raising an exception seems to be the
+                        # best/only way to stop HTMLParser.
+                        raise ScrapedLink(url)
 
 
 def scrape_download_link_in_html(html_url, regexp, http_headers=None):
-    scraper = LinkScraper(regexp)
+    scraper = LinkScraper(html_url, regexp)
     logger.debug("Fetching %r for scraping", html_url)
     response = open_url(html_url, headers=http_headers)
     data = response.read()
@@ -493,10 +496,7 @@ def scrape_download_link_in_html(html_url, regexp, http_headers=None):
     try:
         scraper.feed(data)
     except ScrapedLink, ex:
-        match = ex.match
-        named_groups = match.groupdict()
-        download_url = named_groups.get("url", match.group(0))
-        return urlparse.urljoin(html_url, download_url)
+        return ex.url
     else:
         raise Exception("No link matching %r on %r" % (regexp, html_url))
 
