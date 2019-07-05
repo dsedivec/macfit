@@ -108,18 +108,15 @@ def is_bundle(path):
     return False
 
 
-def open_url(url):
+def open_url(url, headers=None):
     # I preferred urllib2 to urllib here because it raises a nice
-    # error on e.g. HTTP 404.  I spoof the UA because I *thought* I
-    # needed it, but then it turned out the UA wasn't the problem, but
-    # it could be in the future so I just left it here as I'd already
-    # written the code.
-    request = urllib2.Request(
-        url,
-        headers={
-            "User-Agent": "User-Agent: Mozilla/5.0 (Macintosh; Intel Mac OS X 10_14_5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/75.0.3770.100 Safari/537.36"
-        },
-    )
+    # error on e.g. HTTP 404.
+    if headers:
+        headers = headers.copy()
+    else:
+        headers = {}
+    headers.setdefault("Accept", "*/*")
+    request = urllib2.Request(url, headers=headers)
     return urllib2.urlopen(request)
 
 
@@ -127,11 +124,14 @@ class Installer(object):
     def __init__(
         self,
         download_cache_dir=None,
+        user_agent=None,
         install_predicate=None,
         dst_dir=None,
         owner=None,
     ):
         self.download_cache_dir = download_cache_dir
+        self._http_headers = {}
+        self.user_agent = user_agent
         self.install_predicate = install_predicate or (
             lambda _installer, _path: True
         )
@@ -155,6 +155,18 @@ class Installer(object):
         self._temp_dir = tempfile.mkdtemp()
         logger.debug("Temp directory is %r", self._temp_dir)
         self._add_clean_up(shutil.rmtree, self._temp_dir, ignore_errors=True)
+
+    @property
+    def user_agent(self):
+        return self._http_headers.get("User-Agent")
+
+    @user_agent.setter
+    def user_agent(self, value):
+        if value is None:
+            if "User-Agent" in self._http_headers:
+                del self._http_headers["User-Agent"]
+        else:
+            self._http_headers["User-Agent"] = value
 
     def _add_clean_up(self, func, *args, **kwargs):
         self._clean_ups.append((func, args, kwargs))
@@ -216,7 +228,7 @@ class Installer(object):
                     logger.debug("Using cached %r", cache_path)
                     return self.install_from_path(cache_path)
         logger.debug("Downloading %r", url)
-        response = open_url(url)
+        response = open_url(url, headers=self._http_headers)
         if self.download_cache_dir:
             download_dir = self.download_cache_dir
             download_name = cache_file_name
@@ -438,10 +450,10 @@ class LinkScraper(HTMLParser):
                         raise ScrapedLink(match)
 
 
-def scrape_download_link_in_html(html_url, regexp):
+def scrape_download_link_in_html(html_url, regexp, http_headers=None):
     scraper = LinkScraper(regexp)
     logger.debug("Fetching %r for scraping", html_url)
-    response = open_url(html_url)
+    response = open_url(html_url, headers=http_headers)
     data = response.read()
     response.close()
     try:
@@ -522,6 +534,9 @@ def main(argv):
             Ignored when installing a local file.""",
     )
     parser.add_argument("--scrape-html", metavar="REGEXP")
+    parser.add_argument(
+        "--user-agent", "-U", help="User agent to send with HTTP requests."
+    )
     parser.add_argument("url_or_path")
     parser.set_defaults(cache_dir=None)
     args = parser.parse_args(argv[1:])
@@ -546,13 +561,18 @@ def main(argv):
     else:
         predicate = None
     if args.scrape_html:
+        if args.user_agent:
+            http_headers = {"User-Agent": args.user_agent}
+        else:
+            http_headers = None
         args.url_or_path = scrape_download_link_in_html(
-            args.url_or_path, args.scrape_html
+            args.url_or_path, args.scrape_html, http_headers=http_headers
         )
         logger.debug("Scraping found URL %r", args.url_or_path)
     with Installer(
         download_cache_dir=args.cache_dir,
         install_predicate=predicate,
+        user_agent=args.user_agent,
         dst_dir=args.dst_dir,
         owner=args.owner,
     ) as installer:
