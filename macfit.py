@@ -10,6 +10,7 @@ from __future__ import (
 from HTMLParser import HTMLParser
 import argparse
 import cgi
+import json
 import logging as _logging
 import os
 import os.path
@@ -125,6 +126,7 @@ class Installer(object):
         self,
         download_cache_dir=None,
         user_agent=None,
+        dir_handler=None,
         install_predicate=None,
         dst_dir=None,
         owner=None,
@@ -132,6 +134,7 @@ class Installer(object):
         self.download_cache_dir = download_cache_dir
         self._http_headers = {}
         self.user_agent = user_agent
+        self.dir_handler = dir_handler
         self.install_predicate = install_predicate or (
             lambda _installer, _path: True
         )
@@ -268,14 +271,21 @@ class Installer(object):
         return self.install_from_path(software_path)
 
     def install_from_path(self, path):
-        logger.debug("Installing from path %r", path)
+        logger.debug("Visiting %r", path)
         if os.path.isfile(path):
             return self.install_from_file(path)
         if is_bundle(path):
             return self.install_bundle(path)
         if not os.path.isdir(path):
             return []
-        installed = []
+        if self.dir_handler:
+            should_traverse, installed = self.dir_handler(self, path)
+            if not isinstance(installed, list):
+                installed = list(installed)
+            if not should_traverse:
+                return installed
+        else:
+            installed = []
         try:
             children = os.listdir(path)
         except os.error:
@@ -418,6 +428,30 @@ class Installer(object):
         return [bundle_name]
 
 
+def install_nothing_predicate(_installer, _path):
+    return False
+
+
+def make_regexp_install_predicate(regexps):
+    def regexp_install_predicate(_, path):
+        return any(re.search(regexp, path) for regexp in regexps)
+
+    return regexp_install_predicate
+
+
+def make_dir_handler_to_run_installer(installer_rel_path, installer_args):
+    def dir_handler(_, path):
+        installer_path = os.path.join(path, installer_rel_path)
+        if os.path.isfile(installer_path) and os.access(
+            installer_path, os.X_OK
+        ):
+            subprocess.check_call([installer_path] + installer_args)
+            return True, [installer_path]
+        return True, []
+
+    return dir_handler
+
+
 class Sentinel(object):
     def __init__(self, name):
         self.name = name
@@ -478,7 +512,8 @@ def main(argv):
             "  Ignored when installing an Installer package."
         ),
     )
-    parser.add_argument(
+    install_opts = parser.add_mutually_exclusive_group()
+    install_opts.add_argument(
         "--install",
         "-i",
         dest="install_regexps",
@@ -488,6 +523,22 @@ def main(argv):
         help="""\
             Regexp for bundle or Installer pkg file to install within
             extracted files.  May be specified multiple times.""",
+    )
+    install_opts.add_argument(
+        "--run-installer",
+        "-r",
+        nargs=2,
+        metavar=("PATH", "ARGS"),
+        help="""\
+            Run an installer from one of the extracted directories or
+            mounted volumes.  PATH must be a relative path, though it
+            may be relative to any directory within the install files
+            (though not within a bundle).  If PATH is found while
+            extracting and traversing the install location, it will be
+            run.  All other candidates for installation (bundles,
+            packages) will be ignored.  ARGS must be either the empty
+            string, or else a JSON array which gives a list of string
+            arguments to call the installer with.""",
     )
     dest_args = parser.add_mutually_exclusive_group()
     dest_args.add_argument(
@@ -551,15 +602,15 @@ def main(argv):
             cache_dir, download_name = os.path.split(args.cache)
             args.cache_dir = cache_dir or None
             args.download_name = download_name or None
+    dir_handler = None
+    install_predicate = None
     if args.install_regexps:
-
-        def predicate(_, path):
-            return any(
-                re.search(regexp, path) for regexp in args.install_regexps
-            )
-
-    else:
-        predicate = None
+        install_predicate = make_regexp_install_predicate(args.install_regexps)
+    elif args.run_installer:
+        dir_handler = make_dir_handler_to_run_installer(
+            args.run_installer[0], json.loads(args.run_installer[1])
+        )
+        install_predicate = install_nothing_predicate
     if args.scrape_html:
         if args.user_agent:
             http_headers = {"User-Agent": args.user_agent}
@@ -571,8 +622,9 @@ def main(argv):
         logger.debug("Scraping found URL %r", args.url_or_path)
     with Installer(
         download_cache_dir=args.cache_dir,
-        install_predicate=predicate,
         user_agent=args.user_agent,
+        dir_handler=dir_handler,
+        install_predicate=install_predicate,
         dst_dir=args.dst_dir,
         owner=args.owner,
     ) as installer:
