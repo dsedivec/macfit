@@ -126,6 +126,7 @@ class Installer(object):
         self,
         download_cache_dir=None,
         user_agent=None,
+        agree_eulas=None,
         dir_handler=None,
         install_predicate=None,
         dst_dir=None,
@@ -134,6 +135,7 @@ class Installer(object):
         self.download_cache_dir = download_cache_dir
         self._http_headers = {}
         self.user_agent = user_agent
+        self.agree_eulas = agree_eulas
         self.dir_handler = dir_handler
         self.install_predicate = install_predicate or (
             lambda _installer, _path: True
@@ -323,25 +325,30 @@ class Installer(object):
 
     def install_from_dmg(self, path):
         logger.debug("Mounting DMG %r", path)
-        plist = plistlib.readPlistFromString(
-            subprocess.check_output(
-                # "IDME" seems to be something that could happen
-                # automatically when mounting a disk image.  I don't
-                # think anyone uses it, and it's been disabled by
-                # default since forever.  Still, for security reasons,
-                # and because Homebrew does it, I explicitly disable
-                # it here.
-                [
-                    "hdiutil",
-                    "attach",
-                    "-plist",
-                    "-readonly",
-                    "-noidme",
-                    "-nobrowse",
-                    path,
-                ]
-            )
+        # "IDME" seems to be something that could happen automatically
+        # when mounting a disk image.  I don't think anyone uses it,
+        # and it's been disabled by default since forever.  Still, for
+        # security reasons, and because Homebrew does it, I explicitly
+        # disable it here.
+        hdiutil = subprocess.Popen(
+            [
+                "hdiutil",
+                "attach",
+                "-plist",
+                "-readonly",
+                "-noidme",
+                "-nobrowse",
+                path,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
         )
+        stdout, _ = hdiutil.communicate("qy\n")
+        if hdiutil.wait() != 0:
+            raise Exception("hdiutil failed (%r)" % (hdiutil.returncode,))
+        match = re.search(r"^<\?xml", stdout, re.M)
+        plist_xml = stdout[match.start() :]
+        plist = plistlib.readPlistFromString(plist_xml)
         any_device = None
         mount_point = None
         for entity in plist["system-entities"]:
@@ -588,6 +595,12 @@ def main(argv):
     parser.add_argument(
         "--user-agent", "-U", help="User agent to send with HTTP requests."
     )
+    parser.add_argument(
+        "--agree-eulas",
+        action="store_true",
+        default=False,
+        help="Agree to any and all EULAs when mounting a DMG.",
+    )
     parser.add_argument("url_or_path")
     parser.set_defaults(cache_dir=None)
     args = parser.parse_args(argv[1:])
@@ -623,6 +636,7 @@ def main(argv):
     with Installer(
         download_cache_dir=args.cache_dir,
         user_agent=args.user_agent,
+        agree_eulas=args.agree_eulas,
         dir_handler=dir_handler,
         install_predicate=install_predicate,
         dst_dir=args.dst_dir,
