@@ -230,9 +230,9 @@ class Installer(object):
                 )
                 logger.debug("Looking for cache at %r", cache_path)
                 if os.path.exists(cache_path):
-                    logger.debug("Using cached %r", cache_path)
+                    logger.info("Using cached %r", cache_path)
                     return self.install_from_path(cache_path)
-        logger.debug("Downloading %r", url)
+        logger.info("Downloading %r", url)
         response = open_url(url, headers=self._http_headers)
         if self.download_cache_dir:
             download_dir = self.download_cache_dir
@@ -324,7 +324,7 @@ class Installer(object):
         )
 
     def install_from_dmg(self, path):
-        logger.debug("Mounting DMG %r", path)
+        logger.info("Mounting DMG %r", path)
         # "IDME" seems to be something that could happen automatically
         # when mounting a disk image.  I don't think anyone uses it,
         # and it's been disabled by default since forever.  Still, for
@@ -400,7 +400,7 @@ class Installer(object):
     def install_from_pkg(self, path):
         if not self.install_predicate(self, path):
             return []
-        logger.debug("Calling installer to install %r", path)
+        logger.info("Calling installer to install %r", path)
         subprocess.check_call(["installer", "-pkg", path, "-target", "/"])
         return [os.path.basename(path)]
 
@@ -425,9 +425,10 @@ class Installer(object):
         real_bundle_path = os.path.realpath(path)
         can_move = real_bundle_path.startswith(real_temp_dir + os.sep)
         if can_move:
-            logger.debug("Moving %r to %r", path, dst_bundle)
+            logger.info("Moving %r to %r", path, dst_bundle)
             shutil.move(path, dst_bundle)
         else:
+            logger.info("Copying %r to %r", path, dst_dir)
             copy_with_tar(path, dst_dir)
         if self._should_set_owner:
             change_owner(dst_bundle, self.owner_uid, self.owner_gid)
