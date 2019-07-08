@@ -10,6 +10,7 @@ from __future__ import (
 from HTMLParser import HTMLParser
 import argparse
 import cgi
+import hashlib
 import json
 import logging as _logging
 import os
@@ -217,7 +218,7 @@ class Installer(object):
         else:
             return self.dst_dir
 
-    def install_from_url(self, url, download_name=None):
+    def install_from_url(self, url, download_name=None, check_hash=None):
         logger.debug("Installing from URL %r", url)
         if self.download_cache_dir:
             cache_file_name = download_name or get_url_path_base_name(url)
@@ -228,7 +229,9 @@ class Installer(object):
                 logger.debug("Looking for cache at %r", cache_path)
                 if os.path.exists(cache_path):
                     logger.info("Using cached %r", cache_path)
-                    return self.install_from_path(cache_path)
+                    return self.install_from_path(
+                        cache_path, check_hash=check_hash
+                    )
         logger.info("Downloading %r", url)
         response = open_url(url, user_agent=self.user_agent)
         if self.download_cache_dir:
@@ -267,12 +270,14 @@ class Installer(object):
                 self.owner_gid,
             )
             os.chown(software_path, self.owner_uid, self.owner_gid)
-        return self.install_from_path(software_path)
+        return self.install_from_path(software_path, check_hash=check_hash)
 
-    def install_from_path(self, path):
+    def install_from_path(self, path, check_hash=None):
         logger.debug("Visiting %r", path)
         if os.path.isfile(path):
-            return self.install_from_file(path)
+            return self.install_from_file(path, check_hash=check_hash)
+        if check_hash:
+            raise Exception("Cannot check hash of non-file %r" % (path,))
         if is_bundle(path):
             return self.install_bundle(path)
         if not os.path.isdir(path):
@@ -303,7 +308,28 @@ class Installer(object):
                     installed.extend(self.install_from_path(child_path))
         return installed
 
-    def install_from_file(self, path):
+    def install_from_file(self, path, check_hash=None):
+        if check_hash:
+            hash_type, expected_hash = check_hash.split(":", 1)
+            hash_type = hash_type.lower()
+            hash_obj = hashlib.new(hash_type)
+            with open(path, "rb") as the_file:
+                while True:
+                    # 16 KiB is good enough for shutil.copyfileobj, so
+                    # it's good enough for me.
+                    chunk = the_file.read(16384)
+                    if not chunk:
+                        break
+                    hash_obj.update(chunk)
+            actual_hash = hash_obj.hexdigest()
+            if actual_hash != expected_hash:
+                raise Exception(
+                    (
+                        "%s hash for %r is %r, does not match expected hash %r"
+                        % (hash_type, path, actual_hash, expected_hash)
+                    )
+                )
+            logger.debug("Hash check on %r passed", path)
         match = re.search(r"(?i)\.(dmg|pkg|zip|tar(?:\.(?:z|gz|bz2?))?)$", path)
         if match:
             # Extra split here to lob compression suffixes off tarballs.
@@ -640,6 +666,15 @@ def main(argv):
             Like --check-signature, but only applies to app bundles
             and preference panes.""",
     )
+    parser.add_argument(
+        "--check-hash",
+        metavar="TYPE:HASH",
+        help="""\
+            Check the downloaded or supplied file's hash matches the
+            argument before proceeding to use it.  TYPE must be a hash
+            type supported by your Python installation, such as sha256
+            (always supported by Python).  HASH should be in hex.""",
+    )
     dest_args = parser.add_mutually_exclusive_group()
     dest_args.add_argument(
         "--dest",
@@ -753,10 +788,14 @@ def main(argv):
     ) as installer:
         if is_url(args.url_or_path):
             installed = installer.install_from_url(
-                args.url_or_path, download_name=args.download_name
+                args.url_or_path,
+                download_name=args.download_name,
+                check_hash=args.check_hash,
             )
         else:
-            installed = installer.install_from_path(args.url_or_path)
+            installed = installer.install_from_path(
+                args.url_or_path, check_hash=args.check_hash
+            )
     if not installed:
         raise Exception("Failed to install anything")
 
