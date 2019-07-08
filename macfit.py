@@ -155,8 +155,8 @@ class Installer(object):
             self.owner_uid = None
             self.owner_gid = None
         self._clean_ups = []
-        self.dev_null = open(os.devnull, "wb")
-        self._add_clean_up(self.dev_null.close)
+        self._dev_null = open(os.devnull, "wb")
+        self._add_clean_up(self._dev_null.close)
         self._temp_dir = tempfile.mkdtemp()
         logger.debug("Temp directory is %r", self._temp_dir)
         self._add_clean_up(shutil.rmtree, self._temp_dir, ignore_errors=True)
@@ -320,7 +320,7 @@ class Installer(object):
         self._add_clean_up(
             subprocess.check_call,
             ["hdiutil", "detach", mount_point],
-            stdout=self.dev_null,
+            stdout=self._dev_null,
         )
 
     def install_from_dmg(self, path):
