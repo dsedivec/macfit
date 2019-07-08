@@ -121,6 +121,11 @@ def open_url(url, headers=None):
     return urllib2.urlopen(request)
 
 
+TYPE_DMG = "dmg"
+TYPE_PKG = "pkg"
+TYPE_BUNDLE = "bundle"
+
+
 class Installer(object):
     def __init__(
         self,
@@ -131,6 +136,9 @@ class Installer(object):
         install_predicate=None,
         dst_dir=None,
         owner=None,
+        check_dmg_signature=None,
+        check_pkg_signature=None,
+        check_bundle_signature=None,
     ):
         self.download_cache_dir = download_cache_dir
         self._http_headers = {}
@@ -154,6 +162,9 @@ class Installer(object):
         else:
             self.owner_uid = None
             self.owner_gid = None
+        self.check_dmg_signature = check_dmg_signature
+        self.check_pkg_signature = check_pkg_signature
+        self.check_bundle_signature = check_bundle_signature
         self._clean_ups = []
         self._dev_null = open(os.devnull, "wb")
         self._add_clean_up(self._dev_null.close)
@@ -323,7 +334,59 @@ class Installer(object):
             stdout=self._dev_null,
         )
 
+    def _check_signature(self, file_path, file_type):
+        if file_type == TYPE_DMG:
+            assessment_type = "open"
+            check_signature = self.check_dmg_signature
+        elif file_type == TYPE_PKG:
+            assessment_type = "install"
+            check_signature = self.check_pkg_signature
+        elif file_type == TYPE_BUNDLE:
+            assessment_type = "execute"
+            check_signature = self.check_bundle_signature
+        else:
+            raise Exception("Unknown file_type %r" % (file_type,))
+        if not check_signature:
+            logger.debug("No signature check requested for %r", file_path)
+            return
+        logger.debug("Checking signature for %r", file_path)
+        try:
+            stdout = subprocess.check_output(
+                [
+                    "spctl",
+                    "-a",
+                    "-t",
+                    assessment_type,
+                    # I think this is only necessary for testing DMG
+                    # files, but it seems harmless for the other
+                    # purposes as well.
+                    "--context",
+                    "context:primary-signature",
+                    "--raw",
+                    "-vv",
+                    file_path,
+                ],
+                stderr=self._dev_null,
+            )
+        except subprocess.CalledProcessError:
+            raise Exception(
+                "Failed to verify signature on %r (spctl failed)" % (file_path,)
+            )
+        result = plistlib.readPlistFromString(stdout)
+        if not result.get("assessment:verdict"):
+            raise Exception(
+                "spctl did not report a true verdict for %r" % (file_path,)
+            )
+        if callable(check_signature):
+            originator = result.get("assessment:originator", "")
+            logger.debug(
+                "Calling signature checker for originator: %r", originator
+            )
+            check_signature(file_path, file_type, originator)
+        logger.debug("Signature check passed")
+
     def install_from_dmg(self, path):
+        self._check_signature(path, TYPE_DMG)
         logger.info("Mounting DMG %r", path)
         # "IDME" seems to be something that could happen automatically
         # when mounting a disk image.  I don't think anyone uses it,
@@ -400,6 +463,7 @@ class Installer(object):
     def install_from_pkg(self, path):
         if not self.install_predicate(self, path):
             return []
+        self._check_signature(path, TYPE_PKG)
         logger.info("Calling installer to install %r", path)
         subprocess.check_call(["installer", "-pkg", path, "-target", "/"])
         return [os.path.basename(path)]
@@ -408,6 +472,7 @@ class Installer(object):
         if not self.install_predicate(self, path):
             return []
         path = path.rstrip("/")
+        self._check_signature(path, TYPE_BUNDLE)
         bundle_name = os.path.basename(path)
         ext = os.path.splitext(bundle_name)[1].lower()
         if ext == ".app":
@@ -509,6 +574,19 @@ def scrape_download_link_in_html(html_url, regexp, http_headers=None):
         raise Exception("No link matching %r on %r" % (regexp, html_url))
 
 
+def make_signature_checker(regexp):
+    def check_signature(file_path, _file_type, originator):
+        if not re.search(regexp, originator):
+            raise Exception(
+                (
+                    "Signature originator on %r does not match %r: %r"
+                    % (file_path, regexp, originator)
+                )
+            )
+
+    return check_signature
+
+
 def main(argv):
     _logging.basicConfig()
     parser = argparse.ArgumentParser(prog=argv[0])
@@ -547,6 +625,34 @@ def main(argv):
             packages) will be ignored.  ARGS must be either the empty
             string, or else a JSON array which gives a list of string
             arguments to call the installer with.""",
+    )
+    parser.add_argument(
+        "--check-signature",
+        "-C",
+        metavar="REGEXP",
+        help="""\
+            All DMG files, installer packages, and bundles (app
+            bundles and preference panes) must have a valid signature
+            from an originator matching REGEXP, as output by spctl.
+            REGEXP may also be the string \"valid\", in which case any
+            valid signature will be accepted.""",
+    )
+    parser.add_argument(
+        "--check-dmg-signature",
+        metavar="REGEXP",
+        help="Like --check-signature, but only applies to DMG files.",
+    )
+    parser.add_argument(
+        "--check-pkg-signature",
+        metavar="REGEXP",
+        help="Like --check-signature, but only applies to installer packages.",
+    )
+    parser.add_argument(
+        "--check-bundle-signature",
+        metavar="REGEXP",
+        help="""\
+            Like --check-signature, but only applies to app bundles
+            and preference panes.""",
     )
     dest_args = parser.add_mutually_exclusive_group()
     dest_args.add_argument(
@@ -625,6 +731,23 @@ def main(argv):
             args.run_installer[0], json.loads(args.run_installer[1])
         )
         install_predicate = install_nothing_predicate
+    if args.check_signature and (
+        args.check_dmg_signature
+        or args.check_pkg_signature
+        or args.check_bundle_signature
+    ):
+        raise Exception(
+            (
+                "Cannot use --check-signature with any other"
+                " --check-*-signature option"
+            )
+        )
+    for file_type in (TYPE_DMG, TYPE_PKG, TYPE_BUNDLE):
+        attr = "check_%s_signature" % (file_type,)
+        check_value = args.check_signature or getattr(args, attr)
+        if check_value and check_value != "valid":
+            check_value = make_signature_checker(check_value)
+        setattr(args, attr, check_value)
     if args.scrape_html:
         if args.user_agent:
             http_headers = {"User-Agent": args.user_agent}
@@ -642,6 +765,9 @@ def main(argv):
         install_predicate=install_predicate,
         dst_dir=args.dst_dir,
         owner=args.owner,
+        check_dmg_signature=args.check_dmg_signature,
+        check_pkg_signature=args.check_pkg_signature,
+        check_bundle_signature=args.check_bundle_signature,
     ) as installer:
         if is_url(args.url_or_path):
             installed = installer.install_from_url(
