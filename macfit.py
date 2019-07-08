@@ -719,7 +719,18 @@ def main(argv):
             inferred from the URL, or from the server response.
             Ignored when installing a local file.""",
     )
-    parser.add_argument("--scrape-html", metavar="REGEXP")
+    download_args = parser.add_mutually_exclusive_group()
+    download_args.add_argument(
+        "--cask",
+        action="store_true",
+        default=False,
+        help="""\
+            The given install location is the name of a Homebrew Cask.
+            Retrieve the URL (and do signature checks) as specified in
+            the Cask's description.  This ONLY reads the URL (and
+            hash) from Homebrew, NOTHING else.""",
+    )
+    download_args.add_argument("--scrape-html", metavar="REGEXP")
     parser.add_argument(
         "--user-agent", "-U", help="User agent to send with HTTP requests."
     )
@@ -729,7 +740,12 @@ def main(argv):
         default=False,
         help="Agree to any and all EULAs when mounting a DMG.",
     )
-    parser.add_argument("url_or_path")
+    parser.add_argument(
+        "what_to_install",
+        help="""\
+            May be a local path, URL, Cask name (with --cask) or URL
+            to scrape (with --scrape-html).""",
+    )
     parser.set_defaults(cache_dir=None)
     args = parser.parse_args(argv[1:])
     if args.debug:
@@ -770,10 +786,34 @@ def main(argv):
             check_value = make_signature_checker(check_value)
         setattr(args, attr, check_value)
     if args.scrape_html:
-        args.url_or_path = scrape_download_link_in_html(
-            args.url_or_path, args.scrape_html, user_agent=args.user_agent
+        args.what_to_install = scrape_download_link_in_html(
+            args.what_to_install, args.scrape_html, user_agent=args.user_agent
         )
-        logger.debug("Scraping found URL %r", args.url_or_path)
+        logger.info("Scraping found URL %r", args.what_to_install)
+    elif args.cask:
+        if args.check_hash:
+            raise Exception(
+                (
+                    "Cannot use --check-hash with --cask (hash is taken"
+                    " from the Cask)"
+                )
+            )
+        cask_name = args.what_to_install
+        cask_api_url = "https://formulae.brew.sh/api/cask/%s.json" % (
+            cask_name,
+        )
+        response = open_url(cask_api_url, user_agent=args.user_agent)
+        cask = json.load(response)
+        response.close()
+        args.what_to_install = cask["url"]
+        if not re.search(r"^https?://", args.what_to_install):
+            raise Exception(
+                (
+                    "URL for Cask %r does not look like a URL: %r"
+                    % (cask_name, args.what_to_install)
+                )
+            )
+        args.check_hash = "sha256:%s" % (cask["sha256"],)
     with Installer(
         download_cache_dir=args.cache_dir,
         user_agent=args.user_agent,
@@ -786,15 +826,15 @@ def main(argv):
         check_pkg_signature=args.check_pkg_signature,
         check_bundle_signature=args.check_bundle_signature,
     ) as installer:
-        if is_url(args.url_or_path):
+        if is_url(args.what_to_install):
             installed = installer.install_from_url(
-                args.url_or_path,
+                args.what_to_install,
                 download_name=args.download_name,
                 check_hash=args.check_hash,
             )
         else:
             installed = installer.install_from_path(
-                args.url_or_path, check_hash=args.check_hash
+                args.what_to_install, check_hash=args.check_hash
             )
     if not installed:
         raise Exception("Failed to install anything")
