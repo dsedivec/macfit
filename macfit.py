@@ -109,14 +109,13 @@ def is_bundle(path):
     return False
 
 
-def open_url(url, headers=None):
+def open_url(url, user_agent=None):
     # I preferred urllib2 to urllib here because it raises a nice
     # error on e.g. HTTP 404.
-    if headers:
-        headers = headers.copy()
-    else:
-        headers = {}
-    headers.setdefault("Accept", "*/*")
+    headers = {"Accept": "*/*"}
+    if user_agent:
+        headers["User-Agent"] = user_agent
+    logger.debug("Fetching URL %r", url)
     request = urllib2.Request(url, headers=headers)
     return urllib2.urlopen(request)
 
@@ -141,7 +140,6 @@ class Installer(object):
         check_bundle_signature=None,
     ):
         self.download_cache_dir = download_cache_dir
-        self._http_headers = {}
         self.user_agent = user_agent
         self.agree_eulas = agree_eulas
         self.dir_handler = dir_handler
@@ -171,18 +169,6 @@ class Installer(object):
         self._temp_dir = tempfile.mkdtemp()
         logger.debug("Temp directory is %r", self._temp_dir)
         self._add_clean_up(shutil.rmtree, self._temp_dir, ignore_errors=True)
-
-    @property
-    def user_agent(self):
-        return self._http_headers.get("User-Agent")
-
-    @user_agent.setter
-    def user_agent(self, value):
-        if value is None:
-            if "User-Agent" in self._http_headers:
-                del self._http_headers["User-Agent"]
-        else:
-            self._http_headers["User-Agent"] = value
 
     def _add_clean_up(self, func, *args, **kwargs):
         self._clean_ups.append((func, args, kwargs))
@@ -244,7 +230,7 @@ class Installer(object):
                     logger.info("Using cached %r", cache_path)
                     return self.install_from_path(cache_path)
         logger.info("Downloading %r", url)
-        response = open_url(url, headers=self._http_headers)
+        response = open_url(url, user_agent=self.user_agent)
         if self.download_cache_dir:
             download_dir = self.download_cache_dir
             download_name = cache_file_name
@@ -560,10 +546,10 @@ class LinkScraper(HTMLParser):
                         raise ScrapedLink(url)
 
 
-def scrape_download_link_in_html(html_url, regexp, http_headers=None):
+def scrape_download_link_in_html(html_url, regexp, user_agent=None):
     scraper = LinkScraper(html_url, regexp)
     logger.debug("Fetching %r for scraping", html_url)
-    response = open_url(html_url, headers=http_headers)
+    response = open_url(html_url, user_agent=user_agent)
     data = response.read()
     response.close()
     try:
@@ -749,12 +735,8 @@ def main(argv):
             check_value = make_signature_checker(check_value)
         setattr(args, attr, check_value)
     if args.scrape_html:
-        if args.user_agent:
-            http_headers = {"User-Agent": args.user_agent}
-        else:
-            http_headers = None
         args.url_or_path = scrape_download_link_in_html(
-            args.url_or_path, args.scrape_html, http_headers=http_headers
+            args.url_or_path, args.scrape_html, user_agent=args.user_agent
         )
         logger.debug("Scraping found URL %r", args.url_or_path)
     with Installer(
