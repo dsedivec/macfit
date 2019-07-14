@@ -845,6 +845,13 @@ def main(argv):
             args.what_to_install, args.scrape_html, user_agent=args.user_agent
         )
         logger.info("Scraping found URL %r", args.what_to_install)
+        if not is_url(args.what_to_install):
+            raise Exception(
+                (
+                    "Scraping got something that doesn't look like a URL: %r"
+                    % (args.what_to_install,)
+                )
+            )
     elif args.cask:
         if args.check_hash:
             raise Exception(
