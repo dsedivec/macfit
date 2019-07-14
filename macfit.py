@@ -548,6 +548,19 @@ def make_dir_handler_to_run_installer(installer_rel_path, installer_args):
     return dir_handler
 
 
+def make_dir_handler_to_run_bundle(bundle_rel_path):
+    def dir_handler(_, path):
+        bundle_path = os.path.join(path, bundle_rel_path)
+        if is_bundle(bundle_path):
+            subprocess.check_call(
+                ["/usr/bin/open", "--wait-apps", "--new", bundle_path]
+            )
+            return True, [bundle_path]
+        return True, []
+
+    return dir_handler
+
+
 class Sentinel(object):
     def __init__(self, name):
         self.name = name
@@ -640,7 +653,7 @@ def main(argv):
         "--run-installer",
         "-r",
         nargs=2,
-        metavar=("PATH", "ARGS"),
+        metavar=("NAME", "ARGS"),
         help="""\
             Run an installer from one of the extracted directories or
             mounted volumes.  PATH must be a relative path, though it
@@ -651,6 +664,19 @@ def main(argv):
             packages) will be ignored.  ARGS must be either the empty
             string, or else a JSON array which gives a list of string
             arguments to call the installer with.""",
+    )
+    install_opts.add_argument(
+        "--run-bundle",
+        "-R",
+        metavar="NAME",
+        help="""\
+            Run a bundle from one of the extracted directories or
+            mounted volumes.  PATH must be a relative path, though it
+            may be relative to any directory within the install files
+            (though not within a bundle).  If PATH is found while
+            extracting and traversing the install location, it will be
+            run.  All other candidates for installation (bundles,
+            packages) will be ignored.""",
     )
     parser.add_argument(
         "--check-signature",
@@ -781,6 +807,9 @@ def main(argv):
         dir_handler = make_dir_handler_to_run_installer(
             args.run_installer[0], json.loads(args.run_installer[1])
         )
+        install_predicate = install_nothing_predicate
+    elif args.run_bundle:
+        dir_handler = make_dir_handler_to_run_bundle(args.run_bundle)
         install_predicate = install_nothing_predicate
     if args.check_signature and (
         args.check_dmg_signature
