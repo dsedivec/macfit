@@ -296,8 +296,14 @@ class Installer(object):
             installed = []
         try:
             children = os.listdir(path)
-        except os.error:
+        except os.error, ex:
             # OK!
+            logger.warn(
+                "Ignoring exception trying to list %r: %s: %s",
+                path,
+                ex.__class__.__name__,
+                ex,
+            )
             return []
         for child in children:
             child_path = os.path.join(path, child)
