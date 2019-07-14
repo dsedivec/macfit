@@ -771,6 +771,16 @@ def main(argv):
             the Cask's description.  This ONLY reads the URL (and
             hash) from Homebrew, NOTHING else.""",
     )
+    download_args.add_argument(
+        "--github",
+        metavar="REGEXP",
+        dest="github_regexp",
+        help="""\
+            Download latest release from GitHub repo.  In this case,
+            what_to_install is the name of a GitHub repo, such as
+            robertklep/quotefixformac.  The REGEXP is to match a
+            download name from the latest tagged release.""",
+    )
     download_args.add_argument("--scrape-html", metavar="REGEXP")
     parser.add_argument(
         "--user-agent", "-U", help="User agent to send with HTTP requests."
@@ -784,8 +794,9 @@ def main(argv):
     parser.add_argument(
         "what_to_install",
         help="""\
-            May be a local path, URL, Cask name (with --cask) or URL
-            to scrape (with --scrape-html).""",
+            May be a local path, URL, Cask name (with --cask), GitHub
+            user/repo (with --github), or URL to scrape (with
+            --scrape-html).""",
     )
     parser.set_defaults(cache_dir=None)
     args = parser.parse_args(argv[1:])
@@ -858,6 +869,31 @@ def main(argv):
                 )
             )
         args.check_hash = "sha256:%s" % (cask["sha256"],)
+    elif args.github_regexp:
+        logger.debug(
+            "Fetching %s release information from GitHub", args.what_to_install
+        )
+        release_info = json.load(
+            urllib2.urlopen(
+                (
+                    "https://api.github.com/repos/%s/releases/latest"
+                    % (args.what_to_install,)
+                )
+            )
+        )
+        logger.debug("Scanning GitHub releases")
+        for asset in release_info.get("assets", ()):
+            if re.search(
+                args.github_regexp, asset.get("name", "")
+            ) and asset.get("browser_download_url"):
+                break
+        else:
+            raise Exception(
+                "%s has no assets matching %r"
+                % (args.what_to_install, args.github_regexp)
+            )
+        logger.info("Found release %r", asset["name"])
+        args.what_to_install = asset["browser_download_url"]
     with Installer(
         download_cache_dir=args.cache_dir,
         user_agent=args.user_agent,
