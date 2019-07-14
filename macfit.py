@@ -598,6 +598,9 @@ def scrape_download_link_in_html(html_url, regexp, user_agent=None):
 
 
 def make_signature_checker(regexp):
+    if regexp.startswith("id:"):
+        regexp = r"\(%s\)$" % (re.escape(regexp[3:]),)
+
     def check_signature(file_path, _file_type, originator):
         if not re.search(regexp, originator):
             raise Exception(
