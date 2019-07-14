@@ -100,9 +100,12 @@ def chmod_recursive(path, mode="u+rwX,og+rX,og-w"):
 
 def is_bundle(path):
     # This is just meant to be a "good enough" test for whether
-    # something looks like a macOS app or preference pane bundle.
+    # something looks like a macOS app, preference pane, or Mail.app
+    # bundle.
     path = path.rstrip("/")
-    if re.search(r"(?i)\.(?:app|prefpane)$", path) and os.path.isdir(path):
+    if re.search(r"(?i)\.(?:app|prefpane|mailbundle)$", path) and os.path.isdir(
+        path
+    ):
         contents_dir = os.path.join(path, "Contents")
         return os.path.isdir(contents_dir) and os.path.exists(
             os.path.join(contents_dir, "Info.plist")
@@ -200,23 +203,24 @@ class Installer(object):
     def _should_set_owner(self):
         return self.owner_uid is not None
 
-    @property
-    def _dst_dir_application(self):
-        if self.dst_dir == DST_DIR_SYSTEM:
-            return "/Applications"
-        elif self.dst_dir == DST_DIR_USER:
-            return os.path.expanduser("~/Applications")
-        else:
-            return self.dst_dir
-
-    @property
-    def _dst_dir_prefpane(self):
-        if self.dst_dir == DST_DIR_SYSTEM:
-            return "/Library/PreferencePanes"
-        elif self.dst_dir == DST_DIR_USER:
-            return os.path.expanduser("~/Library/PreferencePanes")
-        else:
-            return self.dst_dir
+    def _dst_dir_for_bundle(self, extension):
+        assert extension.startswith(".")
+        dst_dir = self.dst_dir
+        if dst_dir in (DST_DIR_SYSTEM, DST_DIR_USER):
+            if extension == ".app":
+                dst_dir = "/Applications"
+            elif extension == ".prefpane":
+                dst_dir = "/Library/PreferencePanes"
+            elif extension == ".mailbundle":
+                dst_dir = "/Library/Mail/Bundles"
+            else:
+                raise Exception(
+                    "Unsupported bundle extension %r" % (extension,)
+                )
+            if self.dst_dir == DST_DIR_USER:
+                assert dst_dir.startswith("/")
+                dst_dir = os.path.expanduser("~%s" % (dst_dir,))
+        return dst_dir
 
     def install_from_url(self, url, download_name=None, check_hash=None):
         logger.debug("Installing from URL %r", url)
@@ -487,12 +491,7 @@ class Installer(object):
         self._check_signature(path, TYPE_BUNDLE)
         bundle_name = os.path.basename(path)
         ext = os.path.splitext(bundle_name)[1].lower()
-        if ext == ".app":
-            dst_dir = self._dst_dir_application
-        elif ext == ".prefpane":
-            dst_dir = self._dst_dir_prefpane
-        else:
-            raise Exception("Can't figure out where to put %r" % (path,))
+        dst_dir = self._dst_dir_for_bundle(ext)
         dst_bundle = os.path.join(dst_dir, bundle_name)
         if os.path.exists(dst_bundle):
             raise Exception(
@@ -644,10 +643,10 @@ def main(argv):
         metavar="REGEXP",
         help="""\
             All DMG files, installer packages, and bundles (app
-            bundles and preference panes) must have a valid signature
-            from an originator matching REGEXP, as output by spctl.
-            REGEXP may also be the string \"valid\", in which case any
-            valid signature will be accepted.""",
+            bundles, preference panes, Mail bundles) must have a valid
+            signature from an originator matching REGEXP, as output by
+            spctl.  REGEXP may also be the string \"valid\", in which
+            case any valid signature will be accepted.""",
     )
     parser.add_argument(
         "--check-dmg-signature",
@@ -663,8 +662,8 @@ def main(argv):
         "--check-bundle-signature",
         metavar="REGEXP",
         help="""\
-            Like --check-signature, but only applies to app bundles
-            and preference panes.""",
+            Like --check-signature, but only applies to app bundles,
+            preference panes, and mail bundles.""",
     )
     parser.add_argument(
         "--check-hash",
