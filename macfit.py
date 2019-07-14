@@ -302,11 +302,17 @@ class Installer(object):
         for child in children:
             child_path = os.path.join(path, child)
             if os.path.islink(child_path):
-                continue
+                # Ignore
+                pass
             elif os.path.isfile(child_path):
                 installed.extend(self.install_from_file(child_path))
             elif os.path.isdir(child_path):
-                if is_bundle(child_path):
+                if child.lower() == "__macosx":
+                    logger.debug(
+                        "Ignoring %r (probably resource forks from a zip file)",
+                        child_path,
+                    )
+                elif is_bundle(child_path):
                     installed.extend(self.install_bundle(child_path))
                 else:
                     installed.extend(self.install_from_path(child_path))
