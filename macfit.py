@@ -719,10 +719,11 @@ def main(argv):
     dest_args.add_argument(
         "--dest",
         dest="dst_dir",
-        help=(
-            "Directory where bundles will be installed."
-            "  Ignored when installing an Installer package."
-        ),
+        help="""\
+            Directory where bundles will be installed.  Ignored when
+            installing an Installer package.  Defaults to
+            /Applications when run as root, otherwise
+            ~/Applications.""",
     )
     dest_args.add_argument(
         "--dest-system",
