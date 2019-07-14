@@ -541,7 +541,7 @@ def make_dir_handler_to_run_installer(installer_rel_path, installer_args):
         if os.path.isfile(installer_path) and os.access(
             installer_path, os.X_OK
         ):
-            subprocess.check_call([installer_path] + installer_args)
+            subprocess.check_call([installer_path] + list(installer_args))
             return True, [installer_path]
         return True, []
 
