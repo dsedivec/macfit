@@ -632,7 +632,15 @@ def make_signature_checker(regexp):
 def main(argv):
     _logging.basicConfig()
     parser = argparse.ArgumentParser(prog=argv[0])
-    parser.add_argument("--debug", "-d", action="store_true", default=False)
+    parser.add_argument(
+        "--debug",
+        "-d",
+        action="store_true",
+        default=False,
+        help="""\
+            Output lots of extra information about what the tool is
+            doing.""",
+    )
     parser.add_argument(
         "--owner",
         help=(
@@ -784,7 +792,16 @@ def main(argv):
             robertklep/quotefixformac.  The REGEXP is to match a
             download name from the latest tagged release.""",
     )
-    download_args.add_argument("--scrape-html", metavar="REGEXP")
+    download_args.add_argument(
+        "--scrape-html",
+        metavar="REGEXP",
+        help="""\
+            what_to_install is a URL to an HTML page where we will
+            look for an <a href"..." where the href matches REGEXP.
+            The first matching URL scraped is the thing to be
+            downloaded and installed (as if that URL, instead, were
+            provided for what_to_install.""",
+    )
     parser.add_argument(
         "--user-agent", "-U", help="User agent to send with HTTP requests."
     )
