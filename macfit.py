@@ -473,8 +473,11 @@ class Installer(object):
     def install_from_zip(self, path):
         extract_dir = tempfile.mkdtemp(dir=self._temp_dir)
         # Python's ZipFile.extractall doesn't preserve permissions
-        # (https://bugs.python.org/issue15795), so we use unzip.
-        subprocess.check_call(["/usr/bin/unzip", path, "-d", extract_dir])
+        # (https://bugs.python.org/issue15795).  Sometimes "unzip"
+        # can't extract an archive
+        # (https://github.com/signalapp/Signal-Desktop/issues/3128).
+        # ditto is our new best hope.
+        subprocess.check_call(["/usr/bin/ditto", "-x", "-k", path, extract_dir])
         return self.install_from_path(extract_dir)
 
     def install_from_tar(self, path):
