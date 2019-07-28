@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+# -*- coding: utf-8; -*-
 
 from __future__ import (
     absolute_import,
@@ -598,8 +599,20 @@ def scrape_download_link_in_html(html_url, regexp, user_agent=None):
     scraper = LinkScraper(html_url, regexp)
     logger.debug("Fetching %r for scraping", html_url)
     response = open_url(html_url, user_agent=user_agent)
+    # Poor man's encoding detection for HTML.  Completely ignoring
+    # meta tags.  If this fails, just whack to ASCII and hope for the
+    # best.  Reason I want to get from str → unicode in Python 2 is
+    # because HTMLParser seems to try and decode character entity
+    # references in the HTML, and those come out unicode, so
+    # internally it may want to convert your input to unicode anyway.
+    _, params = cgi.parse_header(response.headers.get("Content-Type", ""))
+    encoding = params.get("charset", "utf-8")
     data = response.read()
     response.close()
+    try:
+        data = data.decode(encoding)
+    except UnicodeDecodeError:
+        data = data.decode("ascii", "ignore")
     try:
         scraper.feed(data)
     except ScrapedLink, ex:
