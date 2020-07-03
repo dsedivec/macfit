@@ -8,10 +8,10 @@ from __future__ import (
     unicode_literals,
 )
 
-from HTMLParser import HTMLParser
 import argparse
 import cgi
 import hashlib
+from html.parser import HTMLParser
 import json
 import logging as _logging
 import os
@@ -24,8 +24,10 @@ import shutil
 import subprocess
 import sys
 import tempfile
-import urllib2
-import urlparse
+import urllib.error
+import urllib.parse
+import urllib.request
+
 
 logger = _logging.getLogger("macfit")
 
@@ -40,7 +42,7 @@ def create_file(path):
 
 
 def get_url_path_base_name(url):
-    return posixpath.basename(urlparse.urlparse(url).path)
+    return posixpath.basename(urllib.parse.urlparse(url).path)
 
 
 # Homebrew uses ditto (and mkbom and ugh) to copy apps.  rsync from
@@ -121,8 +123,8 @@ def open_url(url, user_agent=None):
     if user_agent:
         headers["User-Agent"] = user_agent
     logger.debug("Fetching URL %r", url)
-    request = urllib2.Request(url, headers=headers)
-    return urllib2.urlopen(request)
+    request = urllib.request.Request(url, headers=headers)
+    return urllib.request.urlopen(request)
 
 
 TYPE_DMG = "dmg"
@@ -130,7 +132,7 @@ TYPE_PKG = "pkg"
 TYPE_BUNDLE = "bundle"
 
 
-class Installer(object):
+class Installer:
     def __init__(
         self,
         download_cache_dir=None,
@@ -297,9 +299,9 @@ class Installer(object):
             installed = []
         try:
             children = os.listdir(path)
-        except os.error, ex:
+        except os.error as ex:
             # OK!
-            logger.warn(
+            logger.warning(
                 "Ignoring exception trying to list %r: %s: %s",
                 path,
                 ex.__class__.__name__,
@@ -396,7 +398,7 @@ class Installer(object):
             raise Exception(
                 "Failed to verify signature on %r (spctl failed)" % (file_path,)
             )
-        result = plistlib.readPlistFromString(stdout)
+        result = plistlib.loads(stdout)
         if not result.get("assessment:verdict"):
             raise Exception(
                 "spctl did not report a true verdict for %r" % (file_path,)
@@ -430,12 +432,12 @@ class Installer(object):
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
         )
-        stdout, _ = hdiutil.communicate("qy\n")
+        stdout, _ = hdiutil.communicate(b"qy\n")
         if hdiutil.wait() != 0:
             raise Exception("hdiutil failed (%r)" % (hdiutil.returncode,))
-        match = re.search(r"^<\?xml", stdout, re.M)
+        match = re.search(rb"^<\?xml", stdout, re.M)
         plist_xml = stdout[match.start() :]
-        plist = plistlib.readPlistFromString(plist_xml)
+        plist = plistlib.loads(plist_xml)
         any_device = None
         mount_point = None
         for entity in plist["system-entities"]:
@@ -560,7 +562,7 @@ def make_dir_handler_to_run_bundle(bundle_rel_path):
     return dir_handler
 
 
-class Sentinel(object):
+class Sentinel:
     def __init__(self, name):
         self.name = name
 
@@ -588,7 +590,7 @@ class LinkScraper(HTMLParser):
         if tag.lower() == "a":
             for name, value in attrs:
                 if name.lower() == "href":
-                    url = urlparse.urljoin(self._base_url, value)
+                    url = urllib.parse.urljoin(self._base_url, value)
                     if self._link_regexp.search(url):
                         # Raising an exception seems to be the
                         # best/only way to stop HTMLParser.
@@ -615,8 +617,8 @@ def scrape_download_link_in_html(html_url, regexp, user_agent=None):
         data = data.decode("ascii", "ignore")
     try:
         scraper.feed(data)
-    except ScrapedLink, ex:
-        return ex.url
+    except ScrapedLink as ex:
+        url = ex.url
     else:
         raise Exception("No link matching %r on %r" % (regexp, html_url))
 
@@ -909,7 +911,7 @@ def main(argv):
             "Fetching %s release information from GitHub", args.what_to_install
         )
         release_info = json.load(
-            urllib2.urlopen(
+            urllib.request.urlopen(
                 (
                     "https://api.github.com/repos/%s/releases/latest"
                     % (args.what_to_install,)
