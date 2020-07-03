@@ -103,15 +103,18 @@ def chmod_recursive(path, mode="u+rwX,og+rX,og-w"):
 
 def is_bundle(path):
     # This is just meant to be a "good enough" test for whether
-    # something looks like a macOS app, preference pane, or Mail.app
-    # bundle.
+    # something looks like a macOS app, preference pane, Mail.app
+    # bundle, or Sketch plug-in.
     path = path.rstrip("/")
-    if re.search(r"(?i)\.(?:app|prefpane|mailbundle)$", path) and os.path.isdir(
-        path
-    ):
+    if re.search(
+        r"(?i)\.(?:app|prefpane|mailbundle|sketchplugin)$", path
+    ) and os.path.isdir(path):
         contents_dir = os.path.join(path, "Contents")
+        file_in_contents_dir = (
+            "Sketch" if path.endswith("sketchplugin") else "Info.plist"
+        )
         return os.path.isdir(contents_dir) and os.path.exists(
-            os.path.join(contents_dir, "Info.plist")
+            os.path.join(contents_dir, file_in_contents_dir)
         )
     return False
 
@@ -216,6 +219,8 @@ class Installer:
                 dst_dir = "/Library/PreferencePanes"
             elif extension == ".mailbundle":
                 dst_dir = "/Library/Mail/Bundles"
+            elif extension == ".sketchplugin":
+                dst_dir = "/Library/Application Support/com.bohemiancoding.sketch3/Plugins"
             else:
                 raise Exception(
                     "Unsupported bundle extension %r" % (extension,)
@@ -501,7 +506,8 @@ class Installer:
         if not self.install_predicate(self, path):
             return []
         path = path.rstrip("/")
-        self._check_signature(path, TYPE_BUNDLE)
+        if not path.lower().endswith(".sketchplugin"):
+            self._check_signature(path, TYPE_BUNDLE)
         bundle_name = os.path.basename(path)
         ext = os.path.splitext(bundle_name)[1].lower()
         dst_dir = self._dst_dir_for_bundle(ext)
@@ -705,10 +711,11 @@ def main(argv):
         metavar="REGEXP",
         help="""\
             All DMG files, installer packages, and bundles (app
-            bundles, preference panes, Mail bundles) must have a valid
-            signature from an originator matching REGEXP, as output by
-            spctl.  REGEXP may also be the string \"valid\", in which
-            case any valid signature will be accepted.""",
+            bundles, preference panes, Mail bundles, Sketch plug-ins)
+            must have a valid signature from an originator matching
+            REGEXP, as output by spctl.  REGEXP may also be the string
+            \"valid\", in which case any valid signature will be
+            accepted.""",
     )
     parser.add_argument(
         "--check-dmg-signature",
