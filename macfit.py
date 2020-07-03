@@ -627,6 +627,22 @@ def scrape_download_link_in_html(html_url, regexp, user_agent=None):
         url = ex.url
     else:
         raise Exception("No link matching %r on %r" % (regexp, html_url))
+    # Today I hate MsgFiler because their MsgFiler Engine download
+    # page uses friggin' Dropbox links.  They look like they're
+    # inserted by hand, and the most recent one has the "?dl=0" at the
+    # end, which we can't do much with.  Look out for this abomination
+    # and fix it.  I am definitely too old for this shit.
+    url_parts = urllib.parse.urlsplit(url)
+    if (
+        re.search(r"^(?:www\.)dropbox.com$", url_parts.hostname)
+        and url_parts.query
+    ):
+        params = urllib.parse.parse_qs(url_parts.query)
+        if params.get("dl") == ["0"]:
+            params["dl"] = ["1"]
+            query = urllib.parse.urlencode(params, doseq=True)
+            url = urllib.parse.urlunsplit(url_parts._replace(query=query))
+    return url
 
 
 def make_signature_checker(regexp):
