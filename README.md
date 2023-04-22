@@ -11,7 +11,7 @@ MacFIT is a tool to download and install macOS software.  Some of its features:
 
 I used this as part of the automated setup of my macOS Mojave install.  **However, I've since switched to mostly installing things via Homebrew casks, which is _probably_ less likely to break and _probably_ a bit more secure.**  I am still using this for installing Mail.app plug-ins, though.
 
-MacFIT is a Python 2 program.  It probably needs Python 2.7, and will run perfectly happily with `/usr/bin/python` on Mojave.  It doesn't use any libraries outside of the standard library.
+MacFIT is a Python 3 program.  It doesn't use any libraries outside of the standard library.
 
 ```
 $ ./macfit.py --help
